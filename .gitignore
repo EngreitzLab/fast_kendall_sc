@@ -25,3 +25,6 @@ fast_kendall_sc/*.so
 fast_kendall_sc/*.pyd
 fast_kendall_sc/*.dylib
 fast_kendall_sc/*.dll
+__pycache__/
+*.pyc
+.pytest_cache/

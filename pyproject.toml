@@ -15,6 +15,12 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "scipy>=1.7",
+]
+
 [tool.maturin]
 binding = "pyo3"
 module-name = "fast_kendall_sc._fast_kendall_sc"

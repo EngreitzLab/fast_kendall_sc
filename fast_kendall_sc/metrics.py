@@ -141,18 +141,17 @@ def batch_kendall_tau(rna_matrix, atac_matrix, gene_indices, peak_indices):
     unique_genes, counts = np.unique(gene_sorted, return_counts=True)
     offsets = np.concatenate(([0], np.cumsum(counts))).astype(np.uintp)
 
-    # The ATAC tie term depends only on the peak, not the gene, so it is
-    # computed once for the whole matrix instead of once per gene. `.sum`
-    # works the same way on a dense array or a scipy.sparse matrix.
-    num_ones = np.asarray(atac_matrix.sum(axis=0)).ravel().astype(np.int64)
-    num_zeros = n_cells - num_ones
-    n_y = (num_ones * (num_ones - 1) / 2.0) + (num_zeros * (num_zeros - 1) / 2.0)
-
     if sp.issparse(rna_matrix) or sp.issparse(atac_matrix):
         flat_results = np.asarray(
-            _run_sparse_batch(rna_matrix, atac_matrix, n_cells, unique_genes, offsets, peak_sorted, n_y)
+            _run_sparse_batch(rna_matrix, atac_matrix, n_cells, unique_genes, offsets, peak_sorted)
         )
     else:
+        # The ATAC tie term depends only on the peak, not the gene, so it's
+        # computed once for the whole matrix instead of once per gene.
+        num_ones = np.sum(atac_matrix, axis=0).astype(np.int64)
+        num_zeros = n_cells - num_ones
+        n_y = (num_ones * (num_ones - 1) / 2.0) + (num_zeros * (num_zeros - 1) / 2.0)
+
         rna_dense = np.asarray(rna_matrix, dtype=np.float64)
         atac_dense = np.asarray(atac_matrix, dtype=np.uint8)
         flat_results = np.asarray(
@@ -166,7 +165,7 @@ def batch_kendall_tau(rna_matrix, atac_matrix, gene_indices, peak_indices):
     return results
 
 
-def _run_sparse_batch(rna_matrix, atac_matrix, n_cells, unique_genes, offsets, peak_sorted, n_y):
+def _run_sparse_batch(rna_matrix, atac_matrix, n_cells, unique_genes, offsets, peak_sorted):
     # RNA needs fast column slicing by gene, hence CSC. Values must be
     # non-negative: the Rust side treats "cell absent from a gene's column"
     # as exactly 0 and relies on that always sorting after every explicit
@@ -181,6 +180,17 @@ def _run_sparse_batch(rna_matrix, atac_matrix, n_cells, unique_genes, offsets, p
     # zero must be dropped first or it would be miscounted as accessible.
     atac_csc = sp.csc_matrix(atac_matrix)
     atac_csc.eliminate_zeros()
+
+    # Since every stored entry is exactly 1, the number of accessible cells
+    # per peak is just that column's nonzero count -- `indptr` already gives
+    # this for free. Deliberately not `atac_csc.sum(axis=0)`: scipy's generic
+    # sparse sum reduction was empirically ~5 orders of magnitude slower here
+    # (8+ seconds vs ~25 microseconds at 250M nnz), likely from a dtype
+    # promotion/matrix-multiply code path never optimized for tiny (uint8)
+    # dtypes at this nnz scale.
+    num_ones = np.diff(atac_csc.indptr).astype(np.int64)
+    num_zeros = n_cells - num_ones
+    n_y = (num_ones * (num_ones - 1) / 2.0) + (num_zeros * (num_zeros - 1) / 2.0)
 
     return _batch_kendall_tau_sparse(
         n_cells,

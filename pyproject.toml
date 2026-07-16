@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fast_kendall_sc"
+version = "0.1.0"
+description = "A fast Python package with a Rust core for single-cell Kendall correlations"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.16",
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+binding = "pyo3"
+module-name = "fast_kendall_sc._fast_kendall_sc"

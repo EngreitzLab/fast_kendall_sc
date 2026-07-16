@@ -1,5 +1,6 @@
 import numpy as np
-from ._fast_kendall_sc import _kendall_concordance_diff, _batch_kendall_tau
+import scipy.sparse as sp
+from ._fast_kendall_sc import _kendall_concordance_diff, _batch_kendall_tau, _batch_kendall_tau_sparse
 
 
 def _new_group_flags(x_sorted):
@@ -96,15 +97,20 @@ def batch_kendall_tau(rna_matrix, atac_matrix, gene_indices, peak_indices):
     parallelized across genes, so this is the entry point to use for large
     batches rather than looping over `kendall_tau_score` in Python.
 
-    rna_matrix : (n_cells, n_genes) dense array of expression values.
-    atac_matrix: (n_cells, n_peaks) dense 0/1 array of accessibility.
+    rna_matrix : (n_cells, n_genes) array of expression values, dense or
+        scipy.sparse. Sparse values must be >= 0.
+    atac_matrix: (n_cells, n_peaks) 0/1 array of accessibility, dense or
+        scipy.sparse.
     gene_indices, peak_indices : 1D arrays of equal length; pair k is
         (gene_indices[k], peak_indices[k]).
 
+    If either input is scipy.sparse, this never materializes a dense
+    (n_cells x n_genes) or (n_cells x n_peaks) matrix -- only one column's
+    worth of dense memory is ever held at a time, which is what makes this
+    usable at atlas scale (hundreds of thousands of cells).
+
     Returns a 1D array of tau values aligned with gene_indices/peak_indices.
     """
-    rna_matrix = np.asarray(rna_matrix, dtype=np.float64)
-    atac_matrix = np.asarray(atac_matrix, dtype=np.uint8)
     gene_indices = np.asarray(gene_indices)
     peak_indices = np.asarray(peak_indices)
 
@@ -136,22 +142,55 @@ def batch_kendall_tau(rna_matrix, atac_matrix, gene_indices, peak_indices):
     offsets = np.concatenate(([0], np.cumsum(counts))).astype(np.uintp)
 
     # The ATAC tie term depends only on the peak, not the gene, so it is
-    # computed once for the whole matrix instead of once per gene.
-    num_ones = atac_matrix.sum(axis=0).astype(np.int64)
+    # computed once for the whole matrix instead of once per gene. `.sum`
+    # works the same way on a dense array or a scipy.sparse matrix.
+    num_ones = np.asarray(atac_matrix.sum(axis=0)).ravel().astype(np.int64)
     num_zeros = n_cells - num_ones
     n_y = (num_ones * (num_ones - 1) / 2.0) + (num_zeros * (num_zeros - 1) / 2.0)
 
-    flat_results = np.asarray(
-        _batch_kendall_tau(
-            rna_matrix,
-            atac_matrix,
-            unique_genes.astype(np.uintp),
-            offsets,
-            peak_sorted,
-            n_y,
+    if sp.issparse(rna_matrix) or sp.issparse(atac_matrix):
+        flat_results = np.asarray(
+            _run_sparse_batch(rna_matrix, atac_matrix, n_cells, unique_genes, offsets, peak_sorted, n_y)
         )
-    )
+    else:
+        rna_dense = np.asarray(rna_matrix, dtype=np.float64)
+        atac_dense = np.asarray(atac_matrix, dtype=np.uint8)
+        flat_results = np.asarray(
+            _batch_kendall_tau(
+                rna_dense, atac_dense, unique_genes.astype(np.uintp), offsets, peak_sorted, n_y
+            )
+        )
 
     results = np.empty(n_pairs, dtype=np.float64)
     results[order] = flat_results
     return results
+
+
+def _run_sparse_batch(rna_matrix, atac_matrix, n_cells, unique_genes, offsets, peak_sorted, n_y):
+    # RNA needs fast column slicing by gene, hence CSC. Values must be
+    # non-negative: the Rust side treats "cell absent from a gene's column"
+    # as exactly 0 and relies on that always sorting after every explicit
+    # value, which only holds if explicit values are strictly positive.
+    rna_csc = sp.csc_matrix(rna_matrix, dtype=np.float64)
+    rna_csc.eliminate_zeros()
+    if rna_csc.data.size and (rna_csc.data < 0).any():
+        raise ValueError("Sparse rna_matrix must not contain negative expression values.")
+
+    # ATAC is assumed already binarized; only column membership (not the
+    # stored value) is used to mean "accessible", so any explicitly stored
+    # zero must be dropped first or it would be miscounted as accessible.
+    atac_csc = sp.csc_matrix(atac_matrix)
+    atac_csc.eliminate_zeros()
+
+    return _batch_kendall_tau_sparse(
+        n_cells,
+        rna_csc.data.astype(np.float64),
+        rna_csc.indices.astype(np.uintp),
+        rna_csc.indptr.astype(np.uintp),
+        atac_csc.indices.astype(np.uintp),
+        atac_csc.indptr.astype(np.uintp),
+        unique_genes.astype(np.uintp),
+        offsets,
+        peak_sorted,
+        n_y,
+    )

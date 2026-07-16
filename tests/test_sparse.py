@@ -110,6 +110,88 @@ def test_sparse_negative_rna_values_raise():
         batch_kendall_tau(rna, atac, np.array([0]), np.array([0]))
 
 
+@pytest.mark.parametrize("seed", range(30))
+def test_sparse_stress_matches_single_gene_calls(seed):
+    # Wider stress sweep for the O(nnz) algorithm (rank binary search, tie
+    # group boundary detection): varies density across a broad range each
+    # trial, including near-empty and near-full columns, since those are
+    # exactly the regimes where off-by-one errors in group/rank boundaries
+    # would show up.
+    rng = np.random.default_rng(1000 + seed)
+    n_cells = rng.integers(20, 250)
+    n_genes = rng.integers(3, 15)
+    n_peaks = rng.integers(3, 15)
+
+    rna_zero_prob = rng.uniform(0.0, 0.95)
+    atac_density = rng.uniform(0.02, 0.9)
+
+    rna_dense = np.where(
+        rng.random((n_cells, n_genes)) < rna_zero_prob, 0, rng.poisson(2, size=(n_cells, n_genes)) + 1
+    ).astype(float)
+    atac_dense = (rng.random((n_cells, n_peaks)) < atac_density).astype(np.uint8)
+
+    gene_indices, peak_indices = _make_ragged_pairs(
+        rng, n_genes, n_peaks, max_peaks_per_gene=min(n_peaks, 6)
+    )
+
+    results = batch_kendall_tau(sp.csc_matrix(rna_dense), sp.csc_matrix(atac_dense), gene_indices, peak_indices)
+
+    for k in range(len(gene_indices)):
+        expected = kendall_tau_score(rna_dense[:, gene_indices[k]], atac_dense[:, peak_indices[k]])
+        assert results[k] == pytest.approx(expected, abs=1e-9, nan_ok=True)
+
+
+def test_sparse_gene_with_zero_expression_everywhere():
+    n_cells = 50
+    rna = sp.csc_matrix(np.zeros((n_cells, 2)))
+    atac_dense = (np.arange(n_cells) % 3 == 0).astype(np.uint8).reshape(-1, 1)
+    result = batch_kendall_tau(rna, sp.csc_matrix(atac_dense), np.array([0]), np.array([0]))
+    assert np.isnan(result[0])
+
+
+def test_sparse_peak_with_no_accessible_cells():
+    rng = np.random.default_rng(11)
+    n_cells = 60
+    rna_dense = np.where(rng.random((n_cells, 1)) < 0.5, 0, rng.poisson(2, size=(n_cells, 1)) + 1).astype(float)
+    atac = sp.csc_matrix(np.zeros((n_cells, 1), dtype=np.uint8))
+    result = batch_kendall_tau(sp.csc_matrix(rna_dense), atac, np.array([0]), np.array([0]))
+    assert np.isnan(result[0])
+
+
+def test_sparse_peak_fully_accessible():
+    rng = np.random.default_rng(12)
+    n_cells = 60
+    rna_dense = np.where(rng.random((n_cells, 1)) < 0.5, 0, rng.poisson(2, size=(n_cells, 1)) + 1).astype(float)
+    atac_dense = np.ones((n_cells, 1), dtype=np.uint8)
+    result = batch_kendall_tau(sp.csc_matrix(rna_dense), sp.csc_matrix(atac_dense), np.array([0]), np.array([0]))
+    expected = kendall_tau_score(rna_dense[:, 0], atac_dense[:, 0])
+    assert np.isnan(result[0]) and np.isnan(expected)
+
+
+def test_sparse_gene_fully_expressed_no_implicit_zero_block():
+    rng = np.random.default_rng(13)
+    n_cells = 80
+    # every cell nonzero -- exercises the case where nnz == n_cells and the
+    # implicit-zero group has size 0
+    rna_dense = (rng.poisson(3, size=(n_cells, 1)) + 1).astype(float)
+    atac_dense = (rng.random((n_cells, 1)) < 0.3).astype(np.uint8)
+    result = batch_kendall_tau(sp.csc_matrix(rna_dense), sp.csc_matrix(atac_dense), np.array([0]), np.array([0]))
+    expected = kendall_tau_score(rna_dense[:, 0], atac_dense[:, 0])
+    assert result[0] == pytest.approx(expected, abs=1e-9, nan_ok=True)
+
+
+def test_sparse_gene_all_explicit_values_tied():
+    # all nonzero entries share the same value -> one big explicit tie group
+    # plus the implicit-zero group; denom should collapse to 0 -> NaN since
+    # the "nonzero" cells all tie regardless, and if that covers every cell,
+    # x has no variance at all.
+    n_cells = 40
+    rna_dense = np.full((n_cells, 1), 5.0)
+    atac_dense = (np.arange(n_cells) % 2).astype(np.uint8).reshape(-1, 1)
+    result = batch_kendall_tau(sp.csc_matrix(rna_dense), sp.csc_matrix(atac_dense), np.array([0]), np.array([0]))
+    assert np.isnan(result[0])
+
+
 def test_sparse_only_one_side_still_uses_sparse_path():
     rng = np.random.default_rng(9)
     n_cells, n_genes, n_peaks = 120, 4, 5

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "fast_kendall_sc"
-version = "0.1.0"
+version = "1.0.0"
 description = "A fast Python package with a Rust core for single-cell Kendall correlations"
 requires-python = ">=3.8"
 dependencies = [

@@ -1,0 +1,128 @@
+name: Build and publish wheels
+
+# Prebuilt wheels mean consumers never need a Rust toolchain or a C linker to
+# install this package. That matters for conda-based pipelines (e.g. scE2G's
+# sc_e2g.yml), where the `mamba env create` pip step runs without the env
+# activated and without a system compiler, so a source build fails with
+# "linker `cc` not found".
+#
+# - Push to a `v*` tag  -> build everything, then publish to PyPI.
+# - Manual dispatch / PR -> build everything and upload artifacts only.
+#   Use this to validate a release BEFORE tagging: a PyPI version can never
+#   be re-uploaded once published.
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'pyproject.toml'
+      - 'src/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Wheels (manylinux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # One manylinux container builds every interpreter in a single pass.
+      # manylinux2014 (glibc 2.17) covers CentOS 7 era hosts, which the
+      # Sherlock/CircleCI images still are.
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          manylinux: '2014'
+          args: >-
+            --release --out dist
+            --interpreter python3.9 python3.10 python3.11 python3.12 python3.13
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: dist
+
+  macos:
+    name: Wheels (macOS arm64, py${{ matrix.python-version }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64-apple-darwin
+          args: --release --out dist --interpreter python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-arm64-${{ matrix.python-version }}
+          path: dist
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  smoke-test:
+    name: Install wheel and import (py${{ matrix.python-version }})
+    needs: [linux]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: dist
+      # --no-index proves the wheel installs with no build step and no
+      # network fallback to the sdist.
+      - name: Install from wheel only
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-index --find-links dist fast_kendall_sc
+          python -m pip install pytest numpy scipy
+      - name: Import and run test suite
+        run: |
+          python -c "from fast_kendall_sc import batch_kendall_tau; print('import OK')"
+          python -m pytest tests -q
+
+  publish:
+    name: Publish to PyPI
+    needs: [linux, macos, sdist, smoke-test]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # required for PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
